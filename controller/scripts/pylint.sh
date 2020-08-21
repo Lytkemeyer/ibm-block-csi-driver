@@ -1,4 +1,4 @@
 #!/bin/bash
 set -x
-pylint --rcfile="$(dirname "$0")/lint.ini" ./controller
+pylint -d W0707 --rcfile="$(dirname "$0")/lint.ini" ./controller
 exit $?
