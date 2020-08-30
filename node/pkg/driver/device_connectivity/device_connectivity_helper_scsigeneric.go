@@ -17,6 +17,7 @@
 package device_connectivity
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -222,6 +223,8 @@ func (r OsDeviceConnectivityHelperScsiGeneric) GetMpathDevice(volumeId string, l
 	for md = range devicePathTosysfs {
 		break // because its a single value in the map(1 mpath device, if not it should fail above), so just take the first
 	}
+	wwn, _ := r.Helper.GetWwnByScsiInq(md)
+	logger.Infof("GetMpathDevice: sg_inq wwn: %s, Found wwn: %s", wwn, md)
 	return md, nil
 }
 
@@ -317,6 +320,7 @@ type OsDeviceConnectivityHelperInterface interface {
 	WaitForPathToExist(devicePath string, maxRetries int, intervalSeconds int) ([]string, bool, error)
 	GetMultipathDisk(path string) (string, error)
 	GetHostsIdByArrayIdentifier(arrayIdentifier string) ([]int, error)
+	GetWwnByScsiInq(dev string) (string, error)
 }
 
 type OsDeviceConnectivityHelperGeneric struct {
@@ -504,4 +508,90 @@ func (o OsDeviceConnectivityHelperGeneric) GetHostsIdByArrayIdentifier(arrayIden
 
 	return HostIDs, nil
 
+}
+
+func (o OsDeviceConnectivityHelperGeneric) GetWwnByScsiInq(dev string) (string, error) {
+	/* scsi inq example
+	$> sg_inq -p 0x83 /dev/mapper/mpathhe
+		VPD INQUIRY: Device Identification page
+		  Designation descriptor number 1, descriptor length: 20
+			designator_type: NAA,  code_set: Binary
+			associated with the addressed logical unit
+			  NAA 6, IEEE Company_id: 0x1738
+			  Vendor Specific Identifier: 0xcfc9035eb
+			  Vendor Specific Identifier Extension: 0xcea5f6
+			  [0x6001738cfc9035eb0000000000ceaaaa]
+		  Designation descriptor number 2, descriptor length: 52
+			designator_type: T10 vendor identification,  code_set: ASCII
+			associated with the addressed logical unit
+			  vendor id: IBM
+			  vendor specific: 2810XIV          60035EB0000000000CEAAAA
+		  Designation descriptor number 3, descriptor length: 43
+			designator_type: vendor specific [0x0],  code_set: ASCII
+			associated with the addressed logical unit
+			  vendor specific: vol=u_k8s_longevity_ibm-ubiquity-db
+		  Designation descriptor number 4, descriptor length: 37
+			designator_type: vendor specific [0x0],  code_set: ASCII
+			associated with the addressed logical unit
+			  vendor specific: host=k8s-acceptance-v18-node1
+		  Designation descriptor number 5, descriptor length: 8
+			designator_type: Target port group,  code_set: Binary
+			associated with the target port
+			  Target port group: 0x0
+		  Designation descriptor number 6, descriptor length: 8
+			designator_type: Relative target port,  code_set: Binary
+			associated with the target port
+			  Relative target port: 0xd22
+	*/
+	sgInqCmd := "sg_inq"
+
+	if err := o.executer.IsExecutable(sgInqCmd); err != nil {
+		return "", err
+	}
+
+	args := []string{"-p", "0x83", dev}
+	// add timeout in case the call never comes back.
+	logger.Debugf("Calling [%s] with timeout", sgInqCmd)
+	outputBytes, err := o.executer.ExecuteWithTimeout(3000, sgInqCmd, args)
+	if err != nil {
+		return "", err
+	}
+	wwnRegex := "(?i)" + `\[0x(.*?)\]`
+	wwnRegexCompiled, err := regexp.Compile(wwnRegex)
+
+	if err != nil {
+		return "", err
+	}
+	/*
+	   sg_inq on device NAA6 returns "Vendor Specific Identifier Extension"
+	   sg_inq on device EUI-64 returns "Vendor Specific Extension Identifier".
+	*/
+	pattern := "(?i)" + "Vendor Specific (Identifier Extension|Extension Identifier):"
+	scanner := bufio.NewScanner(strings.NewReader(string(outputBytes[:])))
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return "", err
+	}
+	wwn := ""
+	found := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if found {
+			matches := wwnRegexCompiled.FindStringSubmatch(line)
+			if len(matches) != 2 {
+				logger.Debugf("wrong line, too many matches in sg_inq output : %#v", matches)
+				return "", &ErrorNoRegexWwnMatchInScsiInq{dev, line}
+			}
+			wwn = matches[1]
+			logger.Debugf("Found the expected Wwn [%s] in sg_inq.", wwn)
+			return wwn, nil
+		}
+		if regex.MatchString(line) {
+			found = true
+			// its one line after "Vendor Specific Identifier Extension:" line which should contain the WWN
+			continue
+		}
+
+	}
+	return "", &MultipathDeviceNotFoundForVolumeError{wwn}
 }
