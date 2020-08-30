@@ -545,10 +545,6 @@ func (o OsDeviceConnectivityHelperGeneric) GetWwnByScsiInq(dev string) (string, 
 	*/
 	sgInqCmd := "sg_inq"
 
-	if err := o.executer.IsExecutable(sgInqCmd); err != nil {
-		return "", err
-	}
-
 	args := []string{"-p", "0x83", dev}
 	// add timeout in case the call never comes back.
 	logger.Debugf("Calling [%s] with timeout", sgInqCmd)
@@ -580,7 +576,7 @@ func (o OsDeviceConnectivityHelperGeneric) GetWwnByScsiInq(dev string) (string, 
 			matches := wwnRegexCompiled.FindStringSubmatch(line)
 			if len(matches) != 2 {
 				logger.Debugf("wrong line, too many matches in sg_inq output : %#v", matches)
-				return "", &ErrorNoRegexWwnMatchInScsiInq{dev, line}
+				return "", &ErrorNothingWasWrittenToScanFileError{dev}
 			}
 			wwn = matches[1]
 			logger.Debugf("Found the expected Wwn [%s] in sg_inq.", wwn)
@@ -593,5 +589,5 @@ func (o OsDeviceConnectivityHelperGeneric) GetWwnByScsiInq(dev string) (string, 
 		}
 
 	}
-	return "", &MultipathDeviceNotFoundForVolumeError{wwn}
+	return "", &MultipathDeviceNotFoundForLunError{wwn, 0, []string{}}
 }
